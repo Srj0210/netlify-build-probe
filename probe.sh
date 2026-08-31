@@ -75,6 +75,20 @@ for D in /tmp /var/tmp /opt/buildhome /opt/build /opt/build/repo; do
 done
 proc_uids=$(for P in /proc/[0-9]*; do awk '/^Uid:/{print $2; exit}' "$P/status" 2>/dev/null; done | sort | uniq -c | awk '{printf "%s:%s ",$2,$1}')
 echo "process_uid_counts=${proc_uids:-none}"
+SELF_PID_NS=$(readlink /proc/self/ns/pid 2>/dev/null || true)
+PID1_PID_NS=$(readlink /proc/1/ns/pid 2>/dev/null || true)
+echo "proc1_dir=$([ -d /proc/1 ] && echo present || echo absent) proc1_ns_dir=$([ -d /proc/1/ns ] && echo present || echo absent)"
+echo "pid_ns_self=${SELF_PID_NS:-absent} pid_ns_pid1=${PID1_PID_NS:-absent} pid_ns_same=$([ -n "$SELF_PID_NS" ] && [ "$SELF_PID_NS" = "$PID1_PID_NS" ] && echo yes || echo no)"
+root_same=0; root_other=0; root_nonzero_caps=0
+for P in /proc/[0-9]*; do
+  uid=$(awk '/^Uid:/{print $2; exit}' "$P/status" 2>/dev/null)
+  [ "$uid" = 0 ] || continue
+  pns=$(readlink "$P/ns/pid" 2>/dev/null || true)
+  if [ "$pns" = "$SELF_PID_NS" ]; then root_same=$((root_same+1)); else root_other=$((root_other+1)); fi
+  cap=$(awk '/^CapEff:/{print $2; exit}' "$P/status" 2>/dev/null)
+  [ -n "$cap" ] && [ "$cap" != "0000000000000000" ] && root_nonzero_caps=$((root_nonzero_caps+1))
+done
+echo "root_process_counts=self_pidns:$root_same other_pidns:$root_other nonzero_cap_eff:$root_nonzero_caps"
 echo "## == SECRETS BEYOND MY USER =="
 echo "matching environment keys (values omitted):"; env | sed 's/=.*//' | grep -iE 'secret|token|key|passw|cred|aws|gcp|_api' | sed 's/$/=<redacted>/' | head -30
 if [ -f ~/.netrc ] || compgen -G '/opt/build*/.netrc' >/dev/null 2>&1; then echo "netrc: present (contents omitted)"; else echo "netrc: absent"; fi

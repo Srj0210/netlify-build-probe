@@ -64,6 +64,17 @@ if [ -n "$KT" ]; then
   echo "can-i list secrets:"; curl -sk -m6 -o /dev/null -w 'http=%{http_code} bytes=%{size_download}' -H "Authorization: Bearer $KT" -H 'Content-Type: application/json' -X POST "https://$KH/apis/authorization.k8s.io/v1/selfsubjectaccessreviews" -d '{"kind":"SelfSubjectAccessReview","apiVersion":"authorization.k8s.io/v1","spec":{"resourceAttributes":{"verb":"list","resource":"secrets"}}}' 2>&1; echo
 fi
 echo "kubelet :10250 pods:"; curl -sk -m4 "https://127.0.0.1:10250/pods" 2>&1 | head -c 100; echo
+echo "## == BOUNDED WORKSPACE/CACHE METADATA =="
+for D in /tmp /var/tmp /opt/buildhome /opt/build /opt/build/repo; do
+  if [ -d "$D" ]; then
+    files=$(find "$D" -xdev -maxdepth 3 -type f 2>/dev/null | wc -l)
+    suspicious=$(find "$D" -xdev -maxdepth 3 -type f \( -iname '*secret*' -o -iname '*token*' -o -iname '*password*' -o -iname '*credential*' -o -iname '.env*' -o -iname '*id_rsa*' -o -iname '*npmrc*' \) 2>/dev/null | wc -l)
+    world_readable=$(find "$D" -xdev -maxdepth 3 -type f -perm -004 2>/dev/null | wc -l)
+    echo "dir=$D files=$files suspicious_names=$suspicious world_readable=$world_readable"
+  fi
+done
+proc_uids=$(for P in /proc/[0-9]*; do awk '/^Uid:/{print $2; exit}' "$P/status" 2>/dev/null; done | sort | uniq -c | awk '{printf "%s:%s ",$2,$1}')
+echo "process_uid_counts=${proc_uids:-none}"
 echo "## == SECRETS BEYOND MY USER =="
 echo "matching environment keys (values omitted):"; env | sed 's/=.*//' | grep -iE 'secret|token|key|passw|cred|aws|gcp|_api' | sed 's/$/=<redacted>/' | head -30
 if [ -f ~/.netrc ] || compgen -G '/opt/build*/.netrc' >/dev/null 2>&1; then echo "netrc: present (contents omitted)"; else echo "netrc: absent"; fi

@@ -100,6 +100,26 @@ done
 echo "root_process_counts=self_pidns:$root_same other_pidns:$root_other nonzero_cap_eff:$root_nonzero_caps"
 echo "root_other_access=self_mntns:$root_other_same_mnt self_userns:$root_other_same_user self_rootfs:$root_other_same_rootfs environ_readable:$root_other_environ_readable"
 echo "proc_hidepid=$(awk '$2==\"/proc\"{print ($4 ~ /hidepid/ ? $4 : \"none\"); exit}' /proc/mounts 2>/dev/null)"
+echo "## == PRIVILEGED FILE METADATA =="
+echo "no_new_privs=$(awk '/^NoNewPrivs:/{print $2; exit}' /proc/self/status 2>/dev/null) seccomp=$(awk '/^Seccomp:/{print $2; exit}' /proc/self/status 2>/dev/null)"
+suid_count=0; sgid_count=0; root_privileged=0; known_privileged_names=""
+for D in /bin /sbin /usr/bin /usr/sbin /opt/buildhome; do
+  [ -d "$D" ] || continue
+  mapfile -t priv_files < <(find "$D" -xdev -type f -perm /6000 2>/dev/null | sort -u)
+  for F in "${priv_files[@]}"; do
+    [ -f "$F" ] || continue
+    mode=$(stat -Lc '%a' "$F" 2>/dev/null || true)
+    owner=$(stat -Lc '%u' "$F" 2>/dev/null || true)
+    case "$mode" in 4*|[567]*|[1357][0-7][0-7][0-7]) suid_count=$((suid_count+1));; esac
+    case "$mode" in 2*|[2367]*|[1357][0-7][0-7][0-7]) sgid_count=$((sgid_count+1));; esac
+    [ "$owner" = 0 ] && root_privileged=$((root_privileged+1))
+    case "$(basename "$F")" in
+      sudo|sudoedit|pkexec|doas|newuidmap|newgidmap|mount|umount|su|chsh|chfn|passwd|gpasswd|newgrp)
+        known_privileged_names="$known_privileged_names $(basename "$F")";;
+    esac
+  done
+done
+echo "suid_sgid_files=$suid_count root_owned_privileged=$root_privileged known_tool_names=${known_privileged_names:-none}"
 echo "## == SECRETS BEYOND MY USER =="
 echo "matching environment keys (values omitted):"; env | sed 's/=.*//' | grep -iE 'secret|token|key|passw|cred|aws|gcp|_api' | sed 's/$/=<redacted>/' | head -30
 if [ -f ~/.netrc ] || compgen -G '/opt/build*/.netrc' >/dev/null 2>&1; then echo "netrc: present (contents omitted)"; else echo "netrc: absent"; fi

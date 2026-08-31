@@ -80,6 +80,10 @@ PID1_PID_NS=$(readlink /proc/1/ns/pid 2>/dev/null || true)
 echo "proc1_dir=$([ -d /proc/1 ] && echo present || echo absent) proc1_ns_dir=$([ -d /proc/1/ns ] && echo present || echo absent)"
 echo "pid_ns_self=${SELF_PID_NS:-absent} pid_ns_pid1=${PID1_PID_NS:-absent} pid_ns_same=$([ -n "$SELF_PID_NS" ] && [ "$SELF_PID_NS" = "$PID1_PID_NS" ] && echo yes || echo no)"
 root_same=0; root_other=0; root_nonzero_caps=0
+root_other_same_mnt=0; root_other_same_user=0; root_other_same_rootfs=0; root_other_environ_readable=0
+SELF_MNT_NS=$(readlink /proc/self/ns/mnt 2>/dev/null || true)
+SELF_USER_NS=$(readlink /proc/self/ns/user 2>/dev/null || true)
+SELF_ROOTFS=$(stat -Lc '%d:%i' / 2>/dev/null || true)
 for P in /proc/[0-9]*; do
   uid=$(awk '/^Uid:/{print $2; exit}' "$P/status" 2>/dev/null)
   [ "$uid" = 0 ] || continue
@@ -87,8 +91,15 @@ for P in /proc/[0-9]*; do
   if [ "$pns" = "$SELF_PID_NS" ]; then root_same=$((root_same+1)); else root_other=$((root_other+1)); fi
   cap=$(awk '/^CapEff:/{print $2; exit}' "$P/status" 2>/dev/null)
   [ -n "$cap" ] && [ "$cap" != "0000000000000000" ] && root_nonzero_caps=$((root_nonzero_caps+1))
+  [ "$pns" = "$SELF_PID_NS" ] && continue
+  [ "$(readlink "$P/ns/mnt" 2>/dev/null || true)" = "$SELF_MNT_NS" ] && root_other_same_mnt=$((root_other_same_mnt+1))
+  [ "$(readlink "$P/ns/user" 2>/dev/null || true)" = "$SELF_USER_NS" ] && root_other_same_user=$((root_other_same_user+1))
+  [ -r "$P/environ" ] && root_other_environ_readable=$((root_other_environ_readable+1))
+  [ -n "$SELF_ROOTFS" ] && [ "$(stat -Lc '%d:%i' "$P/root" 2>/dev/null || true)" = "$SELF_ROOTFS" ] && root_other_same_rootfs=$((root_other_same_rootfs+1))
 done
 echo "root_process_counts=self_pidns:$root_same other_pidns:$root_other nonzero_cap_eff:$root_nonzero_caps"
+echo "root_other_access=self_mntns:$root_other_same_mnt self_userns:$root_other_same_user self_rootfs:$root_other_same_rootfs environ_readable:$root_other_environ_readable"
+echo "proc_hidepid=$(awk '$2==\"/proc\"{print ($4 ~ /hidepid/ ? $4 : \"none\"); exit}' /proc/mounts 2>/dev/null)"
 echo "## == SECRETS BEYOND MY USER =="
 echo "matching environment keys (values omitted):"; env | sed 's/=.*//' | grep -iE 'secret|token|key|passw|cred|aws|gcp|_api' | sed 's/$/=<redacted>/' | head -30
 if [ -f ~/.netrc ] || compgen -G '/opt/build*/.netrc' >/dev/null 2>&1; then echo "netrc: present (contents omitted)"; else echo "netrc: absent"; fi

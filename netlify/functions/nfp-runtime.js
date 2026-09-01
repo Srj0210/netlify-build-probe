@@ -35,15 +35,7 @@ function hmac(key, value, encoding) {
   return crypto.createHmac("sha256", key).update(value).digest(encoding);
 }
 
-async function awsCallerIdentity() {
-  const accessKey = process.env.AWS_ACCESS_KEY_ID;
-  const secretKey = process.env.AWS_SECRET_ACCESS_KEY;
-  const sessionToken = process.env.AWS_SESSION_TOKEN;
-  if (!accessKey || !secretKey) return { present: false };
-
-  const host = "sts.amazonaws.com";
-  const region = process.env.AWS_REGION || "us-east-1";
-  const service = "sts";
+async function signedStsIdentity(host, region, accessKey, secretKey, sessionToken) {
   const now = new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
   const date = now.slice(0, 8);
   const query = "Action=GetCallerIdentity&Version=2011-06-15";
@@ -64,7 +56,7 @@ async function awsCallerIdentity() {
     signedHeaders,
     payloadHash,
   ].join("\n");
-  const scope = `${date}/${region}/${service}/aws4_request`;
+  const scope = `${date}/${region}/sts/aws4_request`;
   const stringToSign = [
     "AWS4-HMAC-SHA256",
     now,
@@ -72,20 +64,66 @@ async function awsCallerIdentity() {
     crypto.createHash("sha256").update(canonicalRequest).digest("hex"),
   ].join("\n");
   const signingKey = hmac(
-    hmac(hmac(hmac("AWS4" + secretKey, date), region), service),
+    hmac(hmac(hmac("AWS4" + secretKey, date), region), "sts"),
     "aws4_request",
   );
   const signature = hmac(signingKey, stringToSign, "hex");
   const authorization =
     `AWS4-HMAC-SHA256 Credential=${accessKey}/${scope}, ` +
     `SignedHeaders=${signedHeaders}, Signature=${signature}`;
-  const response = await boundedFetch(`https://${host}/?${query}`, {
-    "x-amz-date": now,
-    authorization,
-    ...(sessionToken ? { "x-amz-security-token": sessionToken } : {}),
-  });
-  if (response.error || !response.status) return { present: true, ...response };
-  return { present: true, ...response };
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 5000);
+  try {
+    const response = await fetch(`https://${host}/?${query}`, {
+      redirect: "manual",
+      headers: {
+        "x-amz-date": now,
+        authorization,
+        ...(sessionToken ? { "x-amz-security-token": sessionToken } : {}),
+      },
+      signal: controller.signal,
+    });
+    const text = await response.text();
+    const codeMatch = text.match(/<(?:Code|code)>([^<]+)</);
+    return {
+      status: response.status,
+      bytes: Buffer.byteLength(text),
+      error_code: codeMatch ? codeMatch[1] : undefined,
+      has_account: /<(?:Account|account)>/.test(text),
+      has_arn: /<(?:Arn|arn)>/.test(text),
+    };
+  } catch (error) {
+    return { error: error.name === "AbortError" ? "timeout" : error.name };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function awsCallerIdentity() {
+  const accessKey = process.env.AWS_ACCESS_KEY_ID;
+  const secretKey = process.env.AWS_SECRET_ACCESS_KEY;
+  const sessionToken = process.env.AWS_SESSION_TOKEN;
+  if (!accessKey || !secretKey) return { present: false };
+
+  const region = process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION || "us-east-1";
+  return {
+    present: true,
+    global: await signedStsIdentity(
+      "sts.amazonaws.com",
+      "us-east-1",
+      accessKey,
+      secretKey,
+      sessionToken,
+    ),
+    regional: await signedStsIdentity(
+      `sts.${region}.amazonaws.com`,
+      region,
+      accessKey,
+      secretKey,
+      sessionToken,
+    ),
+  };
 }
 
 async function bearerStatus(name, url) {

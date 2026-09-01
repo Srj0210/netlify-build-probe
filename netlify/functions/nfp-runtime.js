@@ -230,6 +230,9 @@ async function awsPermissionChecks() {
     host: "s3.amazonaws.com",
     region: "us-east-1",
     service: "s3",
+    extraHeaders: {
+      "x-amz-content-sha256": crypto.createHash("sha256").update("").digest("hex"),
+    },
   });
   checks.ec2_describe_instances = await signedAwsRequest({
     host: `ec2.${region}.amazonaws.com`,

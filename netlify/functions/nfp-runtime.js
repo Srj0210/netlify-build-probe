@@ -35,6 +35,97 @@ function hmac(key, value, encoding) {
   return crypto.createHmac("sha256", key).update(value).digest(encoding);
 }
 
+function canonicalHeaderValue(value) {
+  return String(value).trim().replace(/\s+/g, " ");
+}
+
+async function signedAwsRequest({
+  host,
+  region,
+  service,
+  method = "GET",
+  path = "/",
+  query = "",
+  body = "",
+  extraHeaders = {},
+}) {
+  const accessKey = process.env.AWS_ACCESS_KEY_ID;
+  const secretKey = process.env.AWS_SECRET_ACCESS_KEY;
+  const sessionToken = process.env.AWS_SESSION_TOKEN;
+  if (!accessKey || !secretKey) return { present: false };
+
+  const now = new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
+  const date = now.slice(0, 8);
+  const payloadHash = crypto.createHash("sha256").update(body).digest("hex");
+  const headers = {
+    host,
+    "x-amz-date": now,
+    ...extraHeaders,
+    ...(sessionToken ? { "x-amz-security-token": sessionToken } : {}),
+  };
+  const canonicalHeaders = Object.keys(headers)
+    .map((name) => name.toLowerCase())
+    .sort()
+    .map((name) => `${name}:${canonicalHeaderValue(headers[name])}`)
+    .join("\n") + "\n";
+  const signedHeaders = Object.keys(headers)
+    .map((name) => name.toLowerCase())
+    .sort()
+    .join(";");
+  const canonicalRequest = [
+    method,
+    path,
+    query,
+    canonicalHeaders,
+    signedHeaders,
+    payloadHash,
+  ].join("\n");
+  const scope = `${date}/${region}/${service}/aws4_request`;
+  const stringToSign = [
+    "AWS4-HMAC-SHA256",
+    now,
+    scope,
+    crypto.createHash("sha256").update(canonicalRequest).digest("hex"),
+  ].join("\n");
+  const signingKey = hmac(
+    hmac(hmac(hmac("AWS4" + secretKey, date), region), service),
+    "aws4_request",
+  );
+  const authorization =
+    `AWS4-HMAC-SHA256 Credential=${accessKey}/${scope}, ` +
+    `SignedHeaders=${signedHeaders}, Signature=${hmac(signingKey, stringToSign, "hex")}`;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 5000);
+  try {
+    const response = await fetch(`https://${host}${path}${query ? `?${query}` : ""}`, {
+      method,
+      redirect: "manual",
+      headers: {
+        ...extraHeaders,
+        "x-amz-date": now,
+        authorization,
+        ...(sessionToken ? { "x-amz-security-token": sessionToken } : {}),
+      },
+      body: method === "GET" ? undefined : body,
+      signal: controller.signal,
+    });
+    const text = await response.text();
+    const errorType = response.headers.get("x-amzn-errortype");
+    const codeMatch = text.match(/<(?:Code|code)>([^<]+)</) ||
+      text.match(/(?:\"__type\"|\"code\")\s*:\s*\"([^\"]+)/i);
+    return {
+      status: response.status,
+      bytes: Buffer.byteLength(text),
+      error_code: errorType ? errorType.split(":")[0] : (codeMatch ? codeMatch[1] : undefined),
+    };
+  } catch (error) {
+    return { error: error.name === "AbortError" ? "timeout" : error.name };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function signedStsIdentity(host, region, accessKey, secretKey, sessionToken) {
   const now = new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
   const date = now.slice(0, 8);
@@ -126,6 +217,69 @@ async function awsCallerIdentity() {
   };
 }
 
+async function awsPermissionChecks() {
+  const region = process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION || "us-east-1";
+  const checks = {};
+  checks.iam_list_roles = await signedAwsRequest({
+    host: "iam.amazonaws.com",
+    region: "us-east-1",
+    service: "iam",
+    query: "Action=ListRoles&MaxItems=1&Version=2010-05-08",
+  });
+  checks.s3_list_buckets = await signedAwsRequest({
+    host: "s3.amazonaws.com",
+    region: "us-east-1",
+    service: "s3",
+  });
+  checks.ec2_describe_instances = await signedAwsRequest({
+    host: `ec2.${region}.amazonaws.com`,
+    region,
+    service: "ec2",
+    query: "Action=DescribeInstances&MaxResults=5&Version=2016-11-15",
+  });
+  checks.lambda_list_functions = await signedAwsRequest({
+    host: `lambda.${region}.amazonaws.com`,
+    region,
+    service: "lambda",
+    path: "/2015-03-31/functions/",
+    query: "MaxItems=1",
+  });
+  checks.secretsmanager_list_secrets = await signedAwsRequest({
+    host: `secretsmanager.${region}.amazonaws.com`,
+    region,
+    service: "secretsmanager",
+    method: "POST",
+    body: JSON.stringify({ MaxResults: 1 }),
+    extraHeaders: {
+      "content-type": "application/x-amz-json-1.1",
+      "x-amz-target": "secretsmanager.ListSecrets",
+    },
+  });
+  checks.ssm_describe_parameters = await signedAwsRequest({
+    host: `ssm.${region}.amazonaws.com`,
+    region,
+    service: "ssm",
+    method: "POST",
+    body: JSON.stringify({ MaxResults: 1 }),
+    extraHeaders: {
+      "content-type": "application/x-amz-json-1.1",
+      "x-amz-target": "AmazonSSM.DescribeParameters",
+    },
+  });
+  checks.eks_list_clusters = await signedAwsRequest({
+    host: `eks.${region}.amazonaws.com`,
+    region,
+    service: "eks",
+    method: "POST",
+    body: "{}",
+    extraHeaders: {
+      "content-type": "application/x-amz-json-1.1",
+      "x-amz-target": "AmazonWebServicesEKS_V20170726.ListClusters",
+    },
+  });
+  return checks;
+}
+
 async function bearerStatus(name, url) {
   const value = process.env[name];
   if (!value) return { present: false };
@@ -188,6 +342,7 @@ exports.handler = async () => {
       "/var/run/secrets/kubernetes.io/serviceaccount/token",
     ),
     aws_caller_identity: await awsCallerIdentity(),
+    aws_permission_checks: await awsPermissionChecks(),
     netlify_functions_token: functionsToken,
     metadata,
     services,

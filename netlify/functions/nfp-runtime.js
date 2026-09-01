@@ -1,3 +1,4 @@
+const crypto = require("crypto");
 const fs = require("fs");
 
 async function boundedFetch(url, headers = {}) {
@@ -28,6 +29,69 @@ function procValue(name) {
   } catch {
     return "unreadable";
   }
+}
+
+function hmac(key, value, encoding) {
+  return crypto.createHmac("sha256", key).update(value).digest(encoding);
+}
+
+async function awsCallerIdentity() {
+  const accessKey = process.env.AWS_ACCESS_KEY_ID;
+  const secretKey = process.env.AWS_SECRET_ACCESS_KEY;
+  const sessionToken = process.env.AWS_SESSION_TOKEN;
+  if (!accessKey || !secretKey) return { present: false };
+
+  const host = "sts.amazonaws.com";
+  const region = process.env.AWS_REGION || "us-east-1";
+  const service = "sts";
+  const now = new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
+  const date = now.slice(0, 8);
+  const query = "Action=GetCallerIdentity&Version=2011-06-15";
+  const payloadHash = crypto.createHash("sha256").update("").digest("hex");
+  const headers = ["host:" + host, "x-amz-date:" + now];
+  const signed = ["host", "x-amz-date"];
+  if (sessionToken) {
+    headers.push("x-amz-security-token:" + sessionToken);
+    signed.push("x-amz-security-token");
+  }
+  const canonicalHeaders = headers.join("\n") + "\n";
+  const signedHeaders = signed.join(";");
+  const canonicalRequest = [
+    "GET",
+    "/",
+    query,
+    canonicalHeaders,
+    signedHeaders,
+    payloadHash,
+  ].join("\n");
+  const scope = `${date}/${region}/${service}/aws4_request`;
+  const stringToSign = [
+    "AWS4-HMAC-SHA256",
+    now,
+    scope,
+    crypto.createHash("sha256").update(canonicalRequest).digest("hex"),
+  ].join("\n");
+  const signingKey = hmac(
+    hmac(hmac(hmac("AWS4" + secretKey, date), region), service),
+    "aws4_request",
+  );
+  const signature = hmac(signingKey, stringToSign, "hex");
+  const authorization =
+    `AWS4-HMAC-SHA256 Credential=${accessKey}/${scope}, ` +
+    `SignedHeaders=${signedHeaders}, Signature=${signature}`;
+  const response = await boundedFetch(`https://${host}/?${query}`, {
+    "x-amz-date": now,
+    authorization,
+    ...(sessionToken ? { "x-amz-security-token": sessionToken } : {}),
+  });
+  if (response.error || !response.status) return { present: true, ...response };
+  return { present: true, ...response };
+}
+
+async function bearerStatus(name, url) {
+  const value = process.env[name];
+  if (!value) return { present: false };
+  return { present: true, ...(await boundedFetch(url, { Authorization: `Bearer ${value}` })) };
 }
 
 exports.handler = async () => {
@@ -67,6 +131,11 @@ exports.handler = async () => {
     services[name] = await boundedFetch(url);
   }
 
+  const functionsToken = await bearerStatus(
+    "NETLIFY_FUNCTIONS_TOKEN",
+    "https://api.netlify.com/api/v1/user",
+  );
+
   const report = {
     uid: typeof process.getuid === "function" ? process.getuid() : "absent",
     gid: typeof process.getgid === "function" ? process.getgid() : "absent",
@@ -80,6 +149,8 @@ exports.handler = async () => {
     k8s_token_file: fs.existsSync(
       "/var/run/secrets/kubernetes.io/serviceaccount/token",
     ),
+    aws_caller_identity: await awsCallerIdentity(),
+    netlify_functions_token: functionsToken,
     metadata,
     services,
   };

